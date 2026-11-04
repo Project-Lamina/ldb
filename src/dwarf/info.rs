@@ -107,7 +107,10 @@ pub fn parse_units(sections: &Sections<'_>) -> Result<Vec<Unit>> {
         let unit_start = r.pos();
         let (unit_len, dwarf64) = r.initial_length()?;
         let after_header = r.pos();
-        let unit_end = after_header + unit_len as usize;
+        let unit_end = usize::try_from(unit_len)
+            .ok()
+            .and_then(|n| after_header.checked_add(n))
+            .unwrap_or(usize::MAX);
         if unit_end > sections.info.len() {
             return Err(LdbError::DwarfError(format!(
                 "compilation unit at {:#x} claims {} bytes, section has {}",
@@ -218,6 +221,12 @@ fn parse_unit(
             break;
         }
     }
+    if unit.dies.is_empty() {
+        return Err(LdbError::DwarfError(format!(
+            "compilation unit at {:#x} declares no DIE, not even a root",
+            unit_start
+        )));
+    }
     Ok(unit)
 }
 
@@ -282,11 +291,11 @@ fn read_form(
         DW_FORM_FLAG_PRESENT => AttrValue::Flag(true),
         DW_FORM_IMPLICIT_CONST => AttrValue::Signed(implicit_const),
         DW_FORM_SEC_OFFSET => AttrValue::SecOffset(r.offset(dwarf64)?),
-        DW_FORM_REF1 => AttrValue::Ref(unit_start + usize::from(r.u8()?)),
-        DW_FORM_REF2 => AttrValue::Ref(unit_start + usize::from(r.u16()?)),
-        DW_FORM_REF4 => AttrValue::Ref(unit_start + r.u32()? as usize),
-        DW_FORM_REF8 => AttrValue::Ref(unit_start + r.u64()? as usize),
-        DW_FORM_REF_UDATA => AttrValue::Ref(unit_start + r.uleb()? as usize),
+        DW_FORM_REF1 => AttrValue::Ref(unit_start.saturating_add(usize::from(r.u8()?))),
+        DW_FORM_REF2 => AttrValue::Ref(unit_start.saturating_add(usize::from(r.u16()?))),
+        DW_FORM_REF4 => AttrValue::Ref(unit_start.saturating_add(r.u32()? as usize)),
+        DW_FORM_REF8 => AttrValue::Ref(unit_start.saturating_add(r.u64()? as usize)),
+        DW_FORM_REF_UDATA => AttrValue::Ref(unit_start.saturating_add(r.uleb()? as usize)),
         DW_FORM_REF_ADDR => AttrValue::Ref(r.offset(dwarf64)? as usize),
         DW_FORM_EXPRLOC | DW_FORM_BLOCK => {
             let n = r.uleb()? as usize;
@@ -310,7 +319,8 @@ fn read_form(
         }
         other => {
             return Err(LdbError::Unsupported(format!(
-                "DW_FORM {:#x} in .debug_info; ldb does not read it yet",
+                "{} ({:#x}) in .debug_info; ldb does not read it yet",
+                form_name(other),
                 other
             )));
         }
