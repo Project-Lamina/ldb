@@ -25,6 +25,11 @@ pub struct Inferior {
     pid: libc::pid_t,
     breakpoints: HashMap<u64, Breakpoint>,
     running: bool,
+    /// The signal the child last stopped on, other than the `SIGTRAP`s ptrace
+    /// raises itself. `PTRACE_CONT` and `PTRACE_SINGLESTEP` take it in `data`
+    /// to deliver it on resume; dropping it would make `continue` after a
+    /// `SIGSEGV` re-run the faulting instruction for ever.
+    pending_signal: i32,
     /// `ET_DYN` images are relocated; every address from the file needs this
     /// added before it names anything in the child.
     load_bias: u64,
@@ -68,6 +73,7 @@ impl Inferior {
             pid,
             breakpoints: HashMap::new(),
             running: true,
+            pending_signal: 0,
             load_bias: 0,
         };
         match inferior.wait()? {
@@ -137,7 +143,14 @@ impl Inferior {
             self.running = false;
             return Ok(Status::Signalled(libc::WTERMSIG(status)));
         }
-        Ok(Status::Stopped(libc::WSTOPSIG(status)))
+        let sig = libc::WSTOPSIG(status);
+        self.pending_signal = if sig == libc::SIGTRAP { 0 } else { sig };
+        Ok(Status::Stopped(sig))
+    }
+
+    /// The signal that will be delivered on the next resume, if any.
+    pub fn pending_signal(&self) -> i32 {
+        self.pending_signal
     }
 
     fn ptrace(&self, req: libc::c_uint, addr: u64, data: u64) -> Result<libc::c_long> {
@@ -340,7 +353,8 @@ impl Inferior {
         } else {
             None
         };
-        self.ptrace(libc::PTRACE_SINGLESTEP, 0, 0)?;
+        let sig = self.take_pending_signal();
+        self.ptrace(libc::PTRACE_SINGLESTEP, 0, sig)?;
         let status = self.wait()?;
         if let Some(addr) = replanted
             && self.running
@@ -358,8 +372,15 @@ impl Inferior {
                 other => return Ok(other),
             }
         }
-        self.ptrace(libc::PTRACE_CONT, 0, 0)?;
+        let sig = self.take_pending_signal();
+        self.ptrace(libc::PTRACE_CONT, 0, sig)?;
         self.wait()
+    }
+
+    fn take_pending_signal(&mut self) -> u64 {
+        let sig = self.pending_signal;
+        self.pending_signal = 0;
+        sig as u64
     }
 
     pub fn kill(&mut self) {
