@@ -90,7 +90,7 @@ impl EhFrame {
     pub fn fde_for_pc(&self, pc: u64) -> Option<&Fde> {
         self.fdes
             .iter()
-            .find(|f| pc >= f.initial_location && pc < f.initial_location + f.address_range.max(1))
+            .find(|f| pc >= f.initial_location && pc - f.initial_location < f.address_range.max(1))
     }
 
     /// Run the CIE's initial instructions and then the FDE's, stopping at `pc`.
@@ -120,6 +120,17 @@ impl EhFrame {
     }
 }
 
+/// `location` plus `delta * code_alignment`. Both factors come from the
+/// section, so the product is saturated rather than allowed to wrap.
+fn advance(loc: u64, delta: u64, code_alignment: u64) -> u64 {
+    loc.saturating_add(delta.saturating_mul(code_alignment))
+}
+
+/// A factored offset times the data alignment factor, both from the section.
+fn scale(factored: i64, data_alignment: i64) -> i64 {
+    factored.saturating_mul(data_alignment)
+}
+
 fn run(insns: &[u8], cie: &Cie, row: &mut Row, loc: &mut u64, stop_pc: u64) -> Result<()> {
     let initial = HashMap::new();
     run_with_initial(insns, cie, row, loc, stop_pc, &initial)
@@ -141,7 +152,7 @@ fn run_with_initial(
         let low = op & 0x3f;
         match high {
             DW_CFA_ADVANCE_LOC => {
-                *loc += u64::from(low) * cie.code_alignment;
+                *loc = advance(*loc, u64::from(low), cie.code_alignment);
                 if *loc > stop_pc {
                     return Ok(());
                 }
@@ -151,7 +162,7 @@ fn run_with_initial(
                 let factored = r.uleb()?;
                 row.regs.insert(
                     u64::from(low),
-                    RegRule::Offset(factored as i64 * cie.data_alignment),
+                    RegRule::Offset(scale(factored as i64, cie.data_alignment)),
                 );
                 continue;
             }
@@ -178,19 +189,19 @@ fn run_with_initial(
                 }
             }
             DW_CFA_ADVANCE_LOC1 => {
-                *loc += u64::from(r.u8()?) * cie.code_alignment;
+                *loc = advance(*loc, u64::from(r.u8()?), cie.code_alignment);
                 if *loc > stop_pc {
                     return Ok(());
                 }
             }
             DW_CFA_ADVANCE_LOC2 => {
-                *loc += u64::from(r.u16()?) * cie.code_alignment;
+                *loc = advance(*loc, u64::from(r.u16()?), cie.code_alignment);
                 if *loc > stop_pc {
                     return Ok(());
                 }
             }
             DW_CFA_ADVANCE_LOC4 => {
-                *loc += u64::from(r.u32()?) * cie.code_alignment;
+                *loc = advance(*loc, u64::from(r.u32()?), cie.code_alignment);
                 if *loc > stop_pc {
                     return Ok(());
                 }
@@ -199,25 +210,25 @@ fn run_with_initial(
                 let reg = r.uleb()?;
                 let factored = r.uleb()? as i64;
                 row.regs
-                    .insert(reg, RegRule::Offset(factored * cie.data_alignment));
+                    .insert(reg, RegRule::Offset(scale(factored, cie.data_alignment)));
             }
             DW_CFA_OFFSET_EXTENDED_SF => {
                 let reg = r.uleb()?;
                 let factored = r.sleb()?;
                 row.regs
-                    .insert(reg, RegRule::Offset(factored * cie.data_alignment));
+                    .insert(reg, RegRule::Offset(scale(factored, cie.data_alignment)));
             }
             DW_CFA_VAL_OFFSET => {
                 let reg = r.uleb()?;
                 let factored = r.uleb()? as i64;
                 row.regs
-                    .insert(reg, RegRule::ValOffset(factored * cie.data_alignment));
+                    .insert(reg, RegRule::ValOffset(scale(factored, cie.data_alignment)));
             }
             DW_CFA_VAL_OFFSET_SF => {
                 let reg = r.uleb()?;
                 let factored = r.sleb()?;
                 row.regs
-                    .insert(reg, RegRule::ValOffset(factored * cie.data_alignment));
+                    .insert(reg, RegRule::ValOffset(scale(factored, cie.data_alignment)));
             }
             DW_CFA_RESTORE_EXTENDED => {
                 let reg = r.uleb()?;
@@ -258,7 +269,7 @@ fn run_with_initial(
             }
             DW_CFA_DEF_CFA_SF => {
                 let reg = r.uleb()?;
-                let offset = r.sleb()? * cie.data_alignment;
+                let offset = scale(r.sleb()?, cie.data_alignment);
                 row.cfa = CfaRule::RegisterOffset { reg, offset };
             }
             DW_CFA_DEF_CFA_REGISTER => {
@@ -284,7 +295,7 @@ fn run_with_initial(
                 }
             }
             DW_CFA_DEF_CFA_OFFSET_SF => {
-                let offset = r.sleb()? * cie.data_alignment;
+                let offset = scale(r.sleb()?, cie.data_alignment);
                 match &mut row.cfa {
                     CfaRule::RegisterOffset { offset: cur, .. } => *cur = offset,
                     CfaRule::Undefined => {
@@ -338,7 +349,10 @@ pub fn parse(section: &[u8], section_addr: u64) -> Result<EhFrame> {
             break;
         }
         let after_len = r.pos();
-        let entry_end = after_len + len as usize;
+        let entry_end = usize::try_from(len)
+            .ok()
+            .and_then(|n| after_len.checked_add(n))
+            .unwrap_or(usize::MAX);
         if entry_end > section.len() {
             return Err(LdbError::DwarfError(format!(
                 ".eh_frame entry at {:#x} runs past the section",
@@ -372,6 +386,12 @@ pub fn parse(section: &[u8], section_addr: u64) -> Result<EhFrame> {
             if cie.has_z {
                 let n = r.uleb()? as usize;
                 r.skip(n)?;
+            }
+            if r.pos() > entry_end {
+                return Err(LdbError::DwarfError(format!(
+                    "FDE at {:#x} has fields that run past its own {} byte entry",
+                    entry_start, len
+                )));
             }
             let instructions = section[r.pos()..entry_end].to_vec();
             fdes.push(Fde {
@@ -407,7 +427,12 @@ fn parse_cie(section: &[u8], r: &mut Reader<'_>, entry_end: usize) -> Result<Cie
     let mut fde_pointer_encoding = 0x00;
     if has_z {
         let aug_len = r.uleb()? as usize;
-        let aug_end = r.pos() + aug_len;
+        let aug_end = r.pos().checked_add(aug_len).filter(|e| *e <= entry_end);
+        let Some(aug_end) = aug_end else {
+            return Err(LdbError::DwarfError(
+                "CIE augmentation data runs past the end of the CIE".into(),
+            ));
+        };
         for c in aug.chars().skip(1) {
             match c {
                 'R' => fde_pointer_encoding = r.u8()?,
@@ -429,7 +454,12 @@ fn parse_cie(section: &[u8], r: &mut Reader<'_>, entry_end: usize) -> Result<Cie
         }
         r.set_pos(aug_end);
     }
-    let instructions = section[r.pos().min(entry_end)..entry_end].to_vec();
+    if r.pos() > entry_end {
+        return Err(LdbError::DwarfError(
+            "CIE header fields run past the end of the CIE".into(),
+        ));
+    }
+    let instructions = section[r.pos()..entry_end].to_vec();
     Ok(Cie {
         code_alignment,
         data_alignment,
