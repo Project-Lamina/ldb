@@ -1,0 +1,30 @@
+name: platforms
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  check:
+    name: "check (${{ matrix.target }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - x86_64-pc-windows-msvc
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # ldb debugs Linux x86_64 only and refuses elsewhere at startup. These
+      # targets have to build so that the refusal is what a user sees, rather
+      # than the compiler errors `cargo install` used to print.
+      - name: Check
+        run: cargo check --target ${{ matrix.target }} --all-targets
