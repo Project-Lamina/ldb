@@ -1,3 +1,6 @@
+//! Shared test helpers; each integration test binary uses a subset.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,6 +80,22 @@ pub fn build(dir: &TempDir, name: &str, source: &str) -> Option<PathBuf> {
         String::from_utf8_lossy(&out.stderr)
     );
     Some(exe)
+}
+
+/// Compile `source` with the system C compiler, or `None` when there is none.
+pub fn cc(dir: &TempDir, name: &str, source: &str, flags: &[&str]) -> Option<PathBuf> {
+    let src = dir.path().join(format!("{name}.c"));
+    std::fs::write(&src, source).unwrap();
+    let exe = dir.path().join(name);
+    let out = Command::new("cc")
+        .arg(src.file_name().unwrap())
+        .args(flags)
+        .arg("-o")
+        .arg(name)
+        .current_dir(dir.path())
+        .output()
+        .ok()?;
+    (out.status.success() && exe.is_file()).then_some(exe)
 }
 
 /// Run ldb in batch mode over `commands` and return everything it printed.
