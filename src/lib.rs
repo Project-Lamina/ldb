@@ -110,6 +110,9 @@ pub fn main() {
 
 fn report_coverage(session: &Session) {
     let db = &session.db;
+    for w in &db.warnings {
+        println!("({})", w);
+    }
     if db.units.is_empty() {
         println!("(no .debug_info: ldb can set breakpoints only on raw addresses)");
     }

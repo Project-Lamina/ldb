@@ -88,3 +88,53 @@ pub fn tag_name(tag: u64) -> &'static str {
         _ => "DW_TAG_<unknown>",
     }
 }
+
+/// The DWARF 5 indexed forms (section 7.5.6). ldb does not read them yet: they
+/// need `.debug_str_offsets`/`.debug_addr` and the CU's base attributes.
+pub fn form_name(form: u64) -> &'static str {
+    match form {
+        DW_FORM_ADDR => "DW_FORM_addr",
+        DW_FORM_BLOCK2 => "DW_FORM_block2",
+        DW_FORM_BLOCK4 => "DW_FORM_block4",
+        DW_FORM_DATA2 => "DW_FORM_data2",
+        DW_FORM_DATA4 => "DW_FORM_data4",
+        DW_FORM_DATA8 => "DW_FORM_data8",
+        DW_FORM_STRING => "DW_FORM_string",
+        DW_FORM_BLOCK => "DW_FORM_block",
+        DW_FORM_BLOCK1 => "DW_FORM_block1",
+        DW_FORM_DATA1 => "DW_FORM_data1",
+        DW_FORM_FLAG => "DW_FORM_flag",
+        DW_FORM_SDATA => "DW_FORM_sdata",
+        DW_FORM_STRP => "DW_FORM_strp",
+        DW_FORM_UDATA => "DW_FORM_udata",
+        DW_FORM_REF_ADDR => "DW_FORM_ref_addr",
+        DW_FORM_REF1 => "DW_FORM_ref1",
+        DW_FORM_REF2 => "DW_FORM_ref2",
+        DW_FORM_REF4 => "DW_FORM_ref4",
+        DW_FORM_REF8 => "DW_FORM_ref8",
+        DW_FORM_REF_UDATA => "DW_FORM_ref_udata",
+        DW_FORM_INDIRECT => "DW_FORM_indirect",
+        DW_FORM_SEC_OFFSET => "DW_FORM_sec_offset",
+        DW_FORM_EXPRLOC => "DW_FORM_exprloc",
+        DW_FORM_FLAG_PRESENT => "DW_FORM_flag_present",
+        0x1a => "DW_FORM_strx",
+        0x1b => "DW_FORM_addrx",
+        0x1c => "DW_FORM_ref_sup4",
+        0x1d => "DW_FORM_strp_sup",
+        0x1e => "DW_FORM_data16",
+        0x1f => "DW_FORM_line_strp",
+        0x20 => "DW_FORM_ref_sig8",
+        DW_FORM_IMPLICIT_CONST => "DW_FORM_implicit_const",
+        0x22 => "DW_FORM_loclistx",
+        0x23 => "DW_FORM_rnglistx",
+        0x25 => "DW_FORM_strx1",
+        0x26 => "DW_FORM_strx2",
+        0x27 => "DW_FORM_strx3",
+        0x28 => "DW_FORM_strx4",
+        0x29 => "DW_FORM_addrx1",
+        0x2a => "DW_FORM_addrx2",
+        0x2b => "DW_FORM_addrx3",
+        0x2c => "DW_FORM_addrx4",
+        _ => "DW_FORM_<unknown>",
+    }
+}

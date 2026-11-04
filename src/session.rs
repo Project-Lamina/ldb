@@ -3,7 +3,7 @@
 use crate::error::{LdbError, Result};
 use crate::inferior::{Inferior, Status};
 use crate::symbols::{DebugInfo, Function, Param, TypeInfo, TypeKind};
-use crate::unwind::{self, Frame};
+use crate::unwind::{self, Frame, StopReason};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -87,13 +87,22 @@ impl Session {
             }
             return;
         }
+        let matched: Vec<&Function> = self
+            .db
+            .functions
+            .iter()
+            .filter(|f| filter.is_none_or(|pat| f.name.contains(pat)))
+            .collect();
+        if matched.is_empty() {
+            println!(
+                "No function in the debug info has `{}` in its name; {} are known.",
+                filter.unwrap_or(""),
+                self.db.functions.len()
+            );
+            return;
+        }
         let mut by_file: HashMap<String, Vec<&Function>> = HashMap::new();
-        for f in &self.db.functions {
-            if let Some(pat) = filter
-                && !f.name.contains(pat)
-            {
-                continue;
-            }
+        for f in matched {
             by_file
                 .entry(
                     f.decl_file
@@ -138,12 +147,30 @@ impl Session {
     }
 
     fn resolve_location(&self, spec: &str) -> Result<(u64, String)> {
-        if let Some(hex) = spec.strip_prefix('*') {
-            let hex = hex.trim().trim_start_matches("0x");
-            let addr = u64::from_str_radix(hex, 16).map_err(|_| {
-                LdbError::Unsupported(format!("`{}` is not a hexadecimal address", spec))
-            })?;
-            return Ok((addr, format!("address {:#x}", addr)));
+        if let Some(rest) = spec.strip_prefix('*') {
+            let rest = rest.trim();
+            // `break *N` must say its own base. Reading a bare `4198400` as hex
+            // would quietly set the breakpoint somewhere else entirely.
+            let addr = match rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+                Some(hex) => u64::from_str_radix(hex, 16).map_err(|_| {
+                    LdbError::Unsupported(format!("`{}` is not a hexadecimal address", rest))
+                })?,
+                None => {
+                    return Err(LdbError::Unsupported(format!(
+                        "`{}` has no base; write `*0x{}` for hexadecimal",
+                        rest, rest
+                    )));
+                }
+            };
+            let what = if self.db.elf.is_pie() {
+                format!(
+                    "file address {:#x} (this image is ET_DYN, so the load bias is added at run)",
+                    addr
+                )
+            } else {
+                format!("address {:#x}", addr)
+            };
+            return Ok((addr, what));
         }
         if let Some((file, line)) = spec.rsplit_once(':')
             && let Ok(line) = line.parse::<u64>()
@@ -205,9 +232,19 @@ impl Session {
             println!("No breakpoint number {}.", number);
             return Ok(());
         };
-        let addr = self.runtime(self.breakpoints[i].file_address);
+        let file_address = self.breakpoints[i].file_address;
         self.breakpoints.remove(i);
+        // Several user breakpoints may share one address and one int3 byte;
+        // the byte goes back only once the last of them is gone.
+        if self
+            .breakpoints
+            .iter()
+            .any(|b| b.file_address == file_address)
+        {
+            return Ok(());
+        }
         if self.inferior.as_ref().is_some_and(Inferior::is_running) {
+            let addr = self.runtime(file_address);
             self.inferior_mut()?.remove_breakpoint(addr)?;
         }
         Ok(())
@@ -259,7 +296,7 @@ impl Session {
                     if code == 0 {
                         "normally".to_string()
                     } else {
-                        format!("with code {:02}", code)
+                        format!("with code {}", code)
                     }
                 );
                 self.inferior = None;
@@ -287,10 +324,17 @@ impl Session {
     }
 
     fn announce_stop_at(&self, addr: u64) {
-        match self.user_breakpoint_at(addr) {
-            Some(n) => print!("\nBreakpoint {}, ", n),
-            None => print!("\nStopped at {:#x}, ", addr),
+        let numbers = self.user_breakpoints_at(addr);
+        if numbers.is_empty() {
+            print!("\nStopped at {:#x}, ", addr);
+            return;
         }
+        let list = numbers
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        print!("\nBreakpoint {}, ", list);
     }
 
     fn announce_breakpoint(&mut self, addr: u64) {
@@ -303,24 +347,28 @@ impl Session {
 
     /// The stack, truncated after `main`. Everything above it is startup code
     /// that carries no CFI, so the walk could not continue anyway.
-    fn frames(&self) -> Result<Vec<Frame>> {
+    fn frames(&self) -> Result<(Vec<Frame>, Option<StopReason>)> {
         let inf = self.inferior()?;
         let eh = self.db.cfi()?;
-        let mut frames = unwind::backtrace(inf, eh, self.bias)?;
+        let (mut frames, stop) = unwind::backtrace(inf, eh, self.bias)?;
         if let Some(i) = frames.iter().position(|f| {
             self.db
                 .function_at(self.file_address(f.lookup_pc()))
                 .is_some_and(|fun| fun.name == "main")
         }) {
             frames.truncate(i + 1);
+            return Ok((frames, None));
         }
-        Ok(frames)
+        Ok((frames, Some(stop)))
     }
 
     pub fn cmd_backtrace(&self) -> Result<()> {
-        let frames = self.frames()?;
+        let (frames, stop) = self.frames()?;
         for (i, f) in frames.iter().enumerate() {
             self.print_frame_line(Some(i), f.pc, f.is_return_address);
+        }
+        if let Some(reason) = stop {
+            println!("{}", reason);
         }
         Ok(())
     }
@@ -363,6 +411,9 @@ impl Session {
     }
 
     fn format_args(&self, f: &Function) -> String {
+        if f.signature_unrecorded() {
+            return "<no parameter DIE, no DW_AT_prototyped>".to_string();
+        }
         f.params
             .iter()
             .map(|p| {
@@ -388,6 +439,13 @@ impl Session {
                 pc
             )));
         };
+        if f.signature_unrecorded() {
+            return Err(LdbError::MissingDebugInfo(format!(
+                "{} has no DW_TAG_formal_parameter child and no DW_AT_prototyped, so this \
+                 binary does not record whether it takes arguments",
+                f.name
+            )));
+        }
         if f.params.is_empty() {
             println!("No arguments.");
             return Ok(());
@@ -452,7 +510,7 @@ impl Session {
     /// Run out of a region with no line table rather than single-stepping
     /// through it. Returns `true` when the program stopped for another reason.
     fn leave_unknown_code(&mut self) -> Result<bool> {
-        let frames = self.frames()?;
+        let (frames, _) = self.frames()?;
         let Some(caller) = frames.get(1) else {
             return Ok(false);
         };
@@ -502,6 +560,16 @@ impl Session {
             .map(|b| b.number)
     }
 
+    /// Every user breakpoint sharing `runtime`, so a stop names all of them
+    /// rather than only the first.
+    fn user_breakpoints_at(&self, runtime: u64) -> Vec<u32> {
+        self.breakpoints
+            .iter()
+            .filter(|b| self.runtime(b.file_address) == runtime)
+            .map(|b| b.number)
+            .collect()
+    }
+
     fn report_landing(&mut self, pc: u64) -> Result<()> {
         match self.user_breakpoint_at(pc) {
             Some(_) => {
@@ -526,17 +594,23 @@ impl Session {
     // ---- finish ----------------------------------------------------------
 
     pub fn cmd_finish(&mut self) -> Result<()> {
-        let frames = self.frames()?;
+        let (frames, stop) = self.frames()?;
         if frames.len() < 2 {
+            if let Some(reason) = stop {
+                return Err(LdbError::MissingDebugInfo(format!(
+                    "the selected frame has no caller ldb can name {}",
+                    reason
+                )));
+            }
             return Err(LdbError::MissingDebugInfo(
                 "the selected frame has no caller that .eh_frame can name".into(),
             ));
         }
         let callee_pc = self.file_address(frames[0].pc);
-        let return_type = self
-            .db
-            .function_at(callee_pc)
-            .and_then(|f| f.return_type.clone());
+        let callee = self.db.function_at(callee_pc);
+        let return_type = callee.and_then(|f| f.return_type.clone());
+        let no_die = callee.is_none();
+        let return_unrecorded = callee.is_some_and(Function::signature_unrecorded);
         print!("Run till exit from #0  ");
         self.print_frame_line(None, frames[0].pc, false);
 
@@ -558,6 +632,22 @@ impl Session {
         self.print_frame_line(None, regs.rip, true);
         self.print_source_line(regs.rip.wrapping_sub(1));
         let xmm0 = self.inferior()?.xmm0()?;
+        if no_die {
+            println!(
+                "No DW_TAG_subprogram covers {:#x}, so ldb has no return type to \
+                 format; rax = {:#x}",
+                callee_pc, regs.rax
+            );
+            return Ok(());
+        }
+        if return_unrecorded {
+            println!(
+                "The DIE for this function carries no DW_AT_type and no DW_AT_prototyped, \
+                 so ldb cannot say whether it returns a value; rax = {:#x}",
+                regs.rax
+            );
+            return Ok(());
+        }
         self.print_return_value(return_type.as_ref(), regs.rax, &xmm0);
         Ok(())
     }

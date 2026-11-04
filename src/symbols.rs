@@ -42,6 +42,11 @@ pub struct Function {
     pub return_type: Option<TypeInfo>,
     pub params: Vec<Param>,
     pub external: bool,
+    /// `DW_AT_prototyped`. Without it an empty parameter list and an absent
+    /// `DW_AT_type` mean the producer recorded no signature, not that the
+    /// function takes nothing and returns nothing: gcc at `-g1` emits exactly
+    /// that shape for a function with two arguments and a return value.
+    pub prototyped: bool,
     pub unit: usize,
 }
 
@@ -50,7 +55,19 @@ impl Function {
         pc >= self.low_pc && pc < self.high_pc
     }
 
+    /// `true` when the DIE says nothing at all about the signature, so neither
+    /// the return type nor the parameter list may be reported as `void`.
+    pub fn signature_unrecorded(&self) -> bool {
+        !self.prototyped && self.return_type.is_none() && self.params.is_empty()
+    }
+
     pub fn signature(&self) -> String {
+        if self.signature_unrecorded() {
+            return format!(
+                "{} (no DW_AT_prototyped, no DW_AT_type, no parameter DIE)",
+                self.name
+            );
+        }
         let ret = self
             .return_type
             .as_ref()
@@ -76,6 +93,10 @@ pub struct DebugInfo {
     pub eh_frame: Option<cfi::EhFrame>,
     pub functions: Vec<Function>,
     pub comp_dir: Option<String>,
+    /// One line per section ldb could not read. A section that will not parse
+    /// costs the commands that need it, not the whole session: `.eh_frame` and
+    /// `.symtab` still answer `bt` and `break *addr` without `.debug_info`.
+    pub warnings: Vec<String>,
 }
 
 impl DebugInfo {
@@ -91,15 +112,22 @@ impl DebugInfo {
         let line_str_sec = elf.section_data(".debug_line_str").to_vec();
         let line_sec = elf.section_data(".debug_line").to_vec();
 
+        let mut warnings = Vec::new();
         let units = if info_sec.is_empty() {
             Vec::new()
         } else {
-            info::parse_units(&info::Sections {
+            match info::parse_units(&info::Sections {
                 info: &info_sec,
                 abbrev: &abbrev_sec,
                 str_: &str_sec,
                 line_str: &line_str_sec,
-            })?
+            }) {
+                Ok(units) => units,
+                Err(e) => {
+                    warnings.push(format!(".debug_info was not read: {}", e));
+                    Vec::new()
+                }
+            }
         };
 
         let line_sections = line::LineSections {
@@ -113,14 +141,24 @@ impl DebugInfo {
                 .root_die()
                 .attr(DW_AT_STMT_LIST)
                 .and_then(info::AttrValue::as_u64);
-            match stmt_list {
-                Some(off) => lines.push(line::parse_program(&line_sections, off as usize)?),
+            match stmt_list.map(|off| line::parse_program(&line_sections, off as usize)) {
+                Some(Ok(p)) => lines.push(p),
+                Some(Err(e)) => {
+                    warnings.push(format!(".debug_line was not read: {}", e));
+                    lines.push(line::LineProgram::default());
+                }
                 None => lines.push(line::LineProgram::default()),
             }
         }
 
         let eh_frame = match elf.section(".eh_frame") {
-            Some(s) if s.size > 0 => Some(cfi::parse(elf.section_data(".eh_frame"), s.addr)?),
+            Some(s) if s.size > 0 => match cfi::parse(elf.section_data(".eh_frame"), s.addr) {
+                Ok(eh) => Some(eh),
+                Err(e) => {
+                    warnings.push(format!(".eh_frame was not read: {}", e));
+                    None
+                }
+            },
             _ => None,
         };
 
@@ -139,6 +177,7 @@ impl DebugInfo {
             eh_frame,
             functions: Vec::new(),
             comp_dir,
+            warnings,
         };
         db.functions = db.collect_functions();
         db.functions.sort_by_key(|f| f.low_pc);
@@ -211,6 +250,7 @@ impl DebugInfo {
                         .and_then(info::AttrValue::as_u64)
                         .unwrap_or(0)
                         != 0,
+                    prototyped: die.attr(DW_AT_PROTOTYPED).is_some(),
                     unit: ui,
                 });
             }
