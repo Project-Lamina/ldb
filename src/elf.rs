@@ -69,8 +69,27 @@ impl Elf {
         if shnum == 0 {
             return Err(LdbError::ElfError("no section headers".into()));
         }
-        if shoff + shnum * shentsize > bytes.len() {
-            return Err(LdbError::ElfError("section headers run past EOF".into()));
+        if shentsize < 64 {
+            return Err(LdbError::ElfError(format!(
+                "e_shentsize {} is smaller than an ELF64 section header (64)",
+                shentsize
+            )));
+        }
+        let table_end = shnum
+            .checked_mul(shentsize)
+            .and_then(|n| shoff.checked_add(n));
+        if table_end.is_none_or(|end| end > bytes.len()) {
+            return Err(LdbError::ElfError(format!(
+                "section headers at {:#x} run past EOF ({} bytes)",
+                shoff,
+                bytes.len()
+            )));
+        }
+        if shstrndx >= shnum {
+            return Err(LdbError::ElfError(format!(
+                "e_shstrndx {} names no section; there are {}",
+                shstrndx, shnum
+            )));
         }
 
         let raw: Vec<[u64; 7]> = (0..shnum)
@@ -90,10 +109,7 @@ impl Elf {
 
         let shstr = {
             let s = &raw[shstrndx];
-            let off = s[3] as usize;
-            let size = s[4] as usize;
-            bytes
-                .get(off..off + size)
+            span(&bytes, s[3], s[4])
                 .ok_or_else(|| LdbError::ElfError("section name table past EOF".into()))?
                 .to_vec()
         };
@@ -121,13 +137,22 @@ impl Elf {
             let st = raw.get(strtab_idx).ok_or_else(|| {
                 LdbError::ElfError(format!("symbol table {} has no string table", i))
             })?;
-            let strtab = bytes
-                .get(st[3] as usize..(st[3] + st[4]) as usize)
-                .unwrap_or(&[]);
+            let strtab = span(&bytes, st[3], st[4]).unwrap_or(&[]);
             let entsize = if s[6] == 0 { 24 } else { s[6] as usize };
+            if entsize < 24 {
+                return Err(LdbError::ElfError(format!(
+                    "symbol table {} has sh_entsize {}, smaller than an Elf64_Sym (24)",
+                    i, entsize
+                )));
+            }
             let count = (s[4] as usize) / entsize;
             for n in 0..count {
-                let b = s[3] as usize + n * entsize;
+                let Some(b) = (s[3] as usize).checked_add(n * entsize) else {
+                    return Err(LdbError::ElfError(format!(
+                        "symbol table {} runs past the address space",
+                        i
+                    )));
+                };
                 let nameoff = u32v(&bytes, b)? as usize;
                 let info = *bytes
                     .get(b + 4)
@@ -163,11 +188,7 @@ impl Elf {
 
     pub fn section_data(&self, name: &str) -> &[u8] {
         match self.section(name) {
-            Some(s) if !s.is_nobits => {
-                let start = s.offset as usize;
-                let end = start + s.size as usize;
-                self.bytes.get(start..end).unwrap_or(&[])
-            }
+            Some(s) if !s.is_nobits => span(&self.bytes, s.offset, s.size).unwrap_or(&[]),
             _ => &[],
         }
     }
@@ -182,22 +203,32 @@ impl Elf {
     }
 }
 
-fn u16(b: &[u8], off: usize) -> Result<u16> {
-    b.get(off..off + 2)
-        .map(|s| u16::from_le_bytes([s[0], s[1]]))
+/// `offset..offset + size` of `bytes`, or `None` if that span is not wholly
+/// inside the file. Both fields come straight out of the section header, so
+/// neither the sum nor the range can be trusted.
+fn span(bytes: &[u8], offset: u64, size: u64) -> Option<&[u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let end = start.checked_add(usize::try_from(size).ok()?)?;
+    bytes.get(start..end)
+}
+
+fn at<const N: usize>(b: &[u8], off: usize) -> Result<[u8; N]> {
+    off.checked_add(N)
+        .and_then(|end| b.get(off..end))
+        .and_then(|s| <[u8; N]>::try_from(s).ok())
         .ok_or_else(|| LdbError::ElfError(format!("read past EOF at {}", off)))
+}
+
+fn u16(b: &[u8], off: usize) -> Result<u16> {
+    Ok(u16::from_le_bytes(at(b, off)?))
 }
 
 fn u32v(b: &[u8], off: usize) -> Result<u32> {
-    b.get(off..off + 4)
-        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-        .ok_or_else(|| LdbError::ElfError(format!("read past EOF at {}", off)))
+    Ok(u32::from_le_bytes(at(b, off)?))
 }
 
 fn u64v(b: &[u8], off: usize) -> Result<u64> {
-    b.get(off..off + 8)
-        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
-        .ok_or_else(|| LdbError::ElfError(format!("read past EOF at {}", off)))
+    Ok(u64::from_le_bytes(at(b, off)?))
 }
 
 fn cstr(table: &[u8], off: usize) -> Option<&str> {
