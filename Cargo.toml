@@ -1,0 +1,23 @@
+[package]
+name = "lamina-ldb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Eira <eira@nornity.com>"]
+description = "ldb - gdb/lldb alternative. Native Linux x86_64 ELF debugger with its own DWARF reader. Built for Lamina output, usable on any ELF."
+license = "Apache-2.0"
+keywords = ["debugger", "dwarf", "elf", "ptrace"]
+categories = ["development-tools::debugging"]
+repository = "https://github.com/Project-Lamina/ldb"
+
+[lib]
+name = "ldb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ldb"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+log = "0.4"
