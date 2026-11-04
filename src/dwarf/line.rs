@@ -128,7 +128,18 @@ pub fn parse_program(sections: &LineSections<'_>, offset: usize) -> Result<LineP
     }
     let mut r = Reader::at(sections.line, offset);
     let (unit_len, dwarf64) = r.initial_length()?;
-    let unit_end = r.pos() + unit_len as usize;
+    let unit_end = usize::try_from(unit_len)
+        .ok()
+        .and_then(|n| r.pos().checked_add(n))
+        .unwrap_or(usize::MAX);
+    if unit_end > sections.line.len() {
+        return Err(LdbError::DwarfError(format!(
+            "line program at {:#x} claims {} bytes, .debug_line has {} left",
+            offset,
+            unit_len,
+            sections.line.len() - r.pos()
+        )));
+    }
     let version = r.u16()?;
     if !(2..=5).contains(&version) {
         return Err(LdbError::Unsupported(format!(
@@ -147,7 +158,16 @@ pub fn parse_program(sections: &LineSections<'_>, offset: usize) -> Result<LineP
         }
     }
     let header_len = r.offset(dwarf64)?;
-    let program_start = r.pos() + header_len as usize;
+    let program_start = usize::try_from(header_len)
+        .ok()
+        .and_then(|n| r.pos().checked_add(n))
+        .filter(|p| *p <= unit_end)
+        .ok_or_else(|| {
+            LdbError::DwarfError(format!(
+                "line program header at {:#x} claims {} bytes, more than the unit holds",
+                offset, header_len
+            ))
+        })?;
     let min_inst_len = r.u8()?;
     let max_ops_per_inst = if version >= 4 { r.u8()? } else { 1 };
     if max_ops_per_inst != 1 {
@@ -190,13 +210,23 @@ pub fn parse_program(sections: &LineSections<'_>, offset: usize) -> Result<LineP
         let opcode = r.u8()?;
         if opcode >= opcode_base {
             let adj = u64::from(opcode - opcode_base);
-            st.address += u64::from(min_inst_len) * (adj / line_range);
-            st.line += line_base + (adj % line_range) as i64;
+            st.address = st
+                .address
+                .wrapping_add(u64::from(min_inst_len).wrapping_mul(adj / line_range));
+            st.line = st
+                .line
+                .saturating_add(line_base.saturating_add((adj % line_range) as i64));
             push_row(&mut program, &st, false);
             st.prologue_end = false;
         } else if opcode == 0 {
             let len = r.uleb()? as usize;
-            let next = r.pos() + len;
+            let Some(next) = r.pos().checked_add(len).filter(|n| *n <= unit_end) else {
+                return Err(LdbError::DwarfError(format!(
+                    "extended line opcode at {:#x} claims {} bytes, past the end of the unit",
+                    r.pos(),
+                    len
+                )));
+            };
             let sub = r.u8()?;
             match sub {
                 DW_LNE_END_SEQUENCE => {
@@ -225,17 +255,25 @@ pub fn parse_program(sections: &LineSections<'_>, offset: usize) -> Result<LineP
                     push_row(&mut program, &st, false);
                     st.prologue_end = false;
                 }
-                DW_LNS_ADVANCE_PC => st.address += u64::from(min_inst_len) * r.uleb()?,
-                DW_LNS_ADVANCE_LINE => st.line += r.sleb()?,
+                DW_LNS_ADVANCE_PC => {
+                    st.address = st
+                        .address
+                        .wrapping_add(u64::from(min_inst_len).wrapping_mul(r.uleb()?))
+                }
+                DW_LNS_ADVANCE_LINE => st.line = st.line.saturating_add(r.sleb()?),
                 DW_LNS_SET_FILE => st.file = r.uleb()?,
                 DW_LNS_SET_COLUMN => st.column = r.uleb()?,
                 DW_LNS_NEGATE_STMT => st.is_stmt = !st.is_stmt,
                 DW_LNS_SET_BASIC_BLOCK => {}
                 DW_LNS_CONST_ADD_PC => {
                     let adj = u64::from(255 - opcode_base);
-                    st.address += u64::from(min_inst_len) * (adj / line_range);
+                    st.address = st
+                        .address
+                        .wrapping_add(u64::from(min_inst_len).wrapping_mul(adj / line_range));
                 }
-                DW_LNS_FIXED_ADVANCE_PC => st.address += u64::from(r.u16()?),
+                DW_LNS_FIXED_ADVANCE_PC => {
+                    st.address = st.address.wrapping_add(u64::from(r.u16()?))
+                }
                 DW_LNS_SET_PROLOGUE_END => st.prologue_end = true,
                 DW_LNS_SET_EPILOGUE_BEGIN => {}
                 DW_LNS_SET_ISA => {
@@ -317,6 +355,13 @@ fn read_entry_list_v5(
         formats.push((r.uleb()?, r.uleb()?));
     }
     let count = r.uleb()?;
+    if count > r.remaining() as u64 {
+        return Err(LdbError::DwarfError(format!(
+            "line header entry list claims {} entries, more than the {} bytes left",
+            count,
+            r.remaining()
+        )));
+    }
     let mut names = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let mut name = String::new();
@@ -375,7 +420,8 @@ fn read_line_form(
         }
         other => {
             return Err(LdbError::Unsupported(format!(
-                "DW_FORM {:#x} in the .debug_line file table",
+                "{} ({:#x}) in the .debug_line file table",
+                crate::dwarf::consts::form_name(other),
                 other
             )));
         }

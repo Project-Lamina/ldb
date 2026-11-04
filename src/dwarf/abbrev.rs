@@ -25,6 +25,13 @@ pub type AbbrevTable = HashMap<u64, Abbrev>;
 
 /// Parse the abbreviation table that starts at `offset` in `.debug_abbrev`.
 pub fn parse_table(section: &[u8], offset: usize) -> Result<AbbrevTable> {
+    if offset >= section.len() && !(section.is_empty() && offset == 0) {
+        return Err(crate::error::LdbError::DwarfError(format!(
+            "abbreviation table offset {:#x} is past the {} byte .debug_abbrev",
+            offset,
+            section.len()
+        )));
+    }
     let mut r = Reader::at(section, offset);
     let mut table = AbbrevTable::new();
     loop {
