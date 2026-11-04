@@ -2,8 +2,8 @@
 
 use crate::dwarf::consts::*;
 use crate::dwarf::{cfi, info, line};
-use crate::elf::Elf;
 use crate::error::{LdbError, Result};
+use crate::object::{DebugSection, Elf};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,11 +106,11 @@ impl DebugInfo {
     }
 
     pub fn from_elf(elf: Elf, path: std::path::PathBuf) -> Result<Self> {
-        let info_sec = elf.section_data(".debug_info").to_vec();
-        let abbrev_sec = elf.section_data(".debug_abbrev").to_vec();
-        let str_sec = elf.section_data(".debug_str").to_vec();
-        let line_str_sec = elf.section_data(".debug_line_str").to_vec();
-        let line_sec = elf.section_data(".debug_line").to_vec();
+        let info_sec = elf.debug_section_data(DebugSection::Info).to_vec();
+        let abbrev_sec = elf.debug_section_data(DebugSection::Abbrev).to_vec();
+        let str_sec = elf.debug_section_data(DebugSection::Str).to_vec();
+        let line_str_sec = elf.debug_section_data(DebugSection::LineStr).to_vec();
+        let line_sec = elf.debug_section_data(DebugSection::Line).to_vec();
 
         let mut warnings = Vec::new();
         let units = if info_sec.is_empty() {
@@ -151,14 +151,16 @@ impl DebugInfo {
             }
         }
 
-        let eh_frame = match elf.section(".eh_frame") {
-            Some(s) if s.size > 0 => match cfi::parse(elf.section_data(".eh_frame"), s.addr) {
-                Ok(eh) => Some(eh),
-                Err(e) => {
-                    warnings.push(format!(".eh_frame was not read: {}", e));
-                    None
+        let eh_frame = match elf.debug_section(DebugSection::EhFrame) {
+            Some(s) if s.size > 0 => {
+                match cfi::parse(elf.debug_section_data(DebugSection::EhFrame), s.addr) {
+                    Ok(eh) => Some(eh),
+                    Err(e) => {
+                        warnings.push(format!(".eh_frame was not read: {}", e));
+                        None
+                    }
                 }
-            },
+            }
             _ => None,
         };
 

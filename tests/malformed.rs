@@ -5,7 +5,7 @@ mod common;
 
 use common::{FACTORIAL, TempDir, build, cc};
 use ldb::dwarf::{cfi, info, line};
-use ldb::elf::Elf;
+use ldb::object::Elf;
 
 /// xorshift64*, so a failing seed can be reproduced from the number alone.
 struct Rng(u64);

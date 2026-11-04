@@ -1,6 +1,8 @@
 //! Just enough ELF64 to find sections and function symbols.
 
+use crate::arch;
 use crate::error::{LdbError, Result};
+use crate::object::{DebugSection, Section, Symbol};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -9,20 +11,16 @@ pub const ET_DYN: u16 = 3;
 
 const STT_FUNC: u8 = 2;
 
-#[derive(Debug, Clone)]
-pub struct Section {
-    pub name: String,
-    pub addr: u64,
-    pub offset: u64,
-    pub size: u64,
-    pub is_nobits: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Symbol {
-    pub name: String,
-    pub value: u64,
-    pub size: u64,
+/// The ELF spelling of each [`DebugSection`].
+fn section_name(which: DebugSection) -> &'static str {
+    match which {
+        DebugSection::Info => ".debug_info",
+        DebugSection::Abbrev => ".debug_abbrev",
+        DebugSection::Str => ".debug_str",
+        DebugSection::LineStr => ".debug_line_str",
+        DebugSection::Line => ".debug_line",
+        DebugSection::EhFrame => ".eh_frame",
+    }
 }
 
 pub struct Elf {
@@ -55,10 +53,11 @@ impl Elf {
         }
         let e_type = u16(&bytes, 16)?;
         let e_machine = u16(&bytes, 18)?;
-        if e_machine != 62 {
+        if e_machine != arch::ELF_MACHINE {
             return Err(LdbError::ElfError(format!(
-                "e_machine {} is not EM_X86_64 (62)",
-                e_machine
+                "e_machine {} is not EM_X86_64 ({})",
+                e_machine,
+                arch::ELF_MACHINE
             )));
         }
         let entry = u64v(&bytes, 24)?;
@@ -195,6 +194,16 @@ impl Elf {
 
     pub fn sections(&self) -> &[Section] {
         &self.sections
+    }
+
+    /// The section holding `which`, under the name ELF gives it.
+    pub fn debug_section(&self, which: DebugSection) -> Option<&Section> {
+        self.section(section_name(which))
+    }
+
+    /// The bytes of `which`, empty when the file has no such section.
+    pub fn debug_section_data(&self, which: DebugSection) -> &[u8] {
+        self.section_data(section_name(which))
     }
 
     /// `true` when the image is position independent and so needs a load bias.
