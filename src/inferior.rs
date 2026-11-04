@@ -1,11 +1,18 @@
-//! The traced process: fork, `PTRACE_TRACEME`, `int3` breakpoints, registers.
+//! The traced process: fork, `PTRACE_TRACEME`, breakpoints, registers.
+//!
+//! This is the process-control seam, and it is Linux. macOS drives a debuggee
+//! through mach exception ports and Windows through `WaitForDebugEvent`;
+//! neither resembles a `waitpid` loop closely enough to share this code, so the
+//! module is gated out there rather than abstracted. What it borrows from
+//! [`crate::arch`] is the trap bytes and how far past them the program counter
+//! reports. The register set it reads is `user_regs_struct`, which is the
+//! operating system's shape for an architecture's registers and so stays here.
 
+use crate::arch;
 use crate::error::{LdbError, Result};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::path::Path;
-
-pub const INT3: u8 = 0xcc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -17,7 +24,9 @@ pub enum Status {
 
 #[derive(Debug, Clone)]
 struct Breakpoint {
-    original: u8,
+    /// The instruction bytes the trap was written over, `arch::TRAP.len()` of
+    /// them.
+    original: Vec<u8>,
     enabled: bool,
 }
 
@@ -281,9 +290,7 @@ impl Inferior {
         if self.has_breakpoint(addr) {
             return Ok(());
         }
-        let word = self.peek_word(addr)?;
-        let original = (word & 0xff) as u8;
-        self.poke_word(addr, (word & !0xffu64) | u64::from(INT3))?;
+        let original = self.write_trap(addr)?;
         self.breakpoints.insert(
             addr,
             Breakpoint {
@@ -299,8 +306,7 @@ impl Inferior {
             return Ok(false);
         };
         if bp.enabled {
-            let word = self.peek_word(addr)?;
-            self.poke_word(addr, (word & !0xffu64) | u64::from(bp.original))?;
+            self.write_bytes_at(addr, &bp.original)?;
         }
         Ok(true)
     }
@@ -312,10 +318,9 @@ impl Inferior {
         if !bp.enabled {
             return Ok(());
         }
-        let original = bp.original;
+        let original = bp.original.clone();
         bp.enabled = false;
-        let word = self.peek_word(addr)?;
-        self.poke_word(addr, (word & !0xffu64) | u64::from(original))
+        self.write_bytes_at(addr, &original)
     }
 
     fn enable(&mut self, addr: u64) -> Result<()> {
@@ -326,15 +331,34 @@ impl Inferior {
             return Ok(());
         }
         bp.enabled = true;
-        let word = self.peek_word(addr)?;
-        self.poke_word(addr, (word & !0xffu64) | u64::from(INT3))
+        self.write_trap(addr).map(|_| ())
     }
 
-    /// After an `int3` trap, `rip` points one byte past the trap. Rewind it so
-    /// it names the breakpoint address again.
+    /// Write `arch::TRAP` over the instruction at `addr`, returning the bytes
+    /// it replaced. The trap is written through a whole `PTRACE_POKEDATA` word,
+    /// so the surrounding bytes of that word are read and put back unchanged.
+    fn write_trap(&self, addr: u64) -> Result<Vec<u8>> {
+        let word = self.peek_word(addr)?;
+        let mut bytes = word.to_le_bytes();
+        let n = arch::TRAP.len();
+        let original = bytes[..n].to_vec();
+        bytes[..n].copy_from_slice(arch::TRAP);
+        self.poke_word(addr, u64::from_le_bytes(bytes))?;
+        Ok(original)
+    }
+
+    fn write_bytes_at(&self, addr: u64, replacement: &[u8]) -> Result<()> {
+        let word = self.peek_word(addr)?;
+        let mut bytes = word.to_le_bytes();
+        bytes[..replacement.len()].copy_from_slice(replacement);
+        self.poke_word(addr, u64::from_le_bytes(bytes))
+    }
+
+    /// After a trap the program counter sits `arch::TRAP_PC_ADVANCE` bytes past
+    /// it. Rewind so it names the breakpoint address again.
     pub fn rewind_over_breakpoint(&mut self) -> Result<Option<u64>> {
         let mut regs = self.regs()?;
-        let candidate = regs.rip.wrapping_sub(1);
+        let candidate = regs.rip.wrapping_sub(arch::TRAP_PC_ADVANCE);
         if !self.has_breakpoint(candidate) {
             return Ok(None);
         }

@@ -1,23 +1,17 @@
 //! Walking the stack with `.eh_frame` CFI.
+//!
+//! The walk itself is architecture-independent: it reads CFI rows and applies
+//! them. What is not is the register file it starts from and the register
+//! numbers it tracks, which come from [`crate::arch`].
 
+use crate::arch::{
+    DW_REG_R12, DW_REG_R13, DW_REG_R14, DW_REG_R15, DW_REG_RBP, DW_REG_RBX, DW_REG_RSP,
+    UNWIND_REGISTERS,
+};
 use crate::dwarf::cfi::{CfaRule, EhFrame, RegRule};
 use crate::error::{LdbError, Result};
 use crate::inferior::Inferior;
 use std::collections::HashMap;
-
-/// DWARF register numbers for x86_64, from the psABI's table 3.36.
-pub const DW_REG_RBX: u64 = 3;
-pub const DW_REG_RBP: u64 = 6;
-pub const DW_REG_RSP: u64 = 7;
-pub const DW_REG_R12: u64 = 12;
-pub const DW_REG_R13: u64 = 13;
-pub const DW_REG_R14: u64 = 14;
-pub const DW_REG_R15: u64 = 15;
-pub const DW_REG_RA: u64 = 16;
-
-const TRACKED: [u64; 7] = [
-    DW_REG_RBX, DW_REG_RBP, DW_REG_RSP, DW_REG_R12, DW_REG_R13, DW_REG_R14, DW_REG_R15,
-];
 
 const MAX_FRAMES: usize = 256;
 
@@ -141,7 +135,7 @@ pub fn backtrace(inf: &Inferior, eh: &EhFrame, bias: u64) -> Result<(Vec<Frame>,
         }
 
         let mut next = file.clone();
-        for reg in TRACKED {
+        for reg in UNWIND_REGISTERS {
             match row.regs.get(&reg) {
                 Some(RegRule::Offset(o)) => {
                     next.insert(reg, inf.peek_word(cfa.wrapping_add(*o as u64))?);
