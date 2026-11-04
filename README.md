@@ -6,8 +6,24 @@ Native Linux x86_64 ELF only. No remote protocol, no core files, no attaching to
 running process. `ldb` forks the program under `PTRACE_TRACEME` and drives it with
 `PTRACE_PEEKDATA`/`POKEDATA`, `PTRACE_GETREGS` and `waitpid`.
 
-The DWARF reader is ldb's own. `gimli` is not a dependency. The only dependencies are
-`libc` and `log`.
+On any other platform ldb builds and then refuses. It names what it debugs, names what
+that platform would need, and exits 2:
+
+```
+$ ldb ./program
+ldb: ldb debugs Linux x86_64 ELF. macOS on x86_64 is not supported yet: ldb has no
+Mach-O reader, and it drives the inferior with ptrace rather than mach exception ports.
+```
+
+Three modules carry the difference. `src/object` reads the executable file and holds the
+ELF reader. `src/inferior` is the ptrace half, and it does not build off Linux x86_64 at
+all. `src/arch` holds what the instruction set decides: the breakpoint trap bytes, how far
+the program counter reports past them, and the DWARF register numbers. Linux aarch64 is
+the nearest of the three missing platforms, because ptrace and ELF both still apply and
+only `src/arch` and the register reads change.
+
+The DWARF reader is ldb's own. `gimli` is not a dependency. The dependencies are `log`,
+and `libc` on Linux x86_64, where the ptrace half builds.
 
 ## Usage
 
@@ -102,6 +118,13 @@ cargo build --release
 cargo clippy --all-targets
 cargo fmt --check
 cargo test
+```
+
+The other platforms are a compile check, since there is nothing there to run:
+
+```
+cargo check --target x86_64-apple-darwin
+cargo check --target x86_64-pc-windows-msvc
 ```
 
 The integration tests build real programs with the lamina compiler. They look for
