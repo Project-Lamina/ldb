@@ -1,40 +1,44 @@
 # ldb
 
-gdb/lldb alternative Debugger by Lamina Chain
+gdb/lldb alternative debugger by Lamina Chain
 
-Native Linux x86_64 ELF only. No remote protocol, no core files, no attaching
-to a running process: `ldb` forks the program under `PTRACE_TRACEME` and drives
-it with `PTRACE_PEEKDATA`/`POKEDATA`, `PTRACE_GETREGS` and `waitpid`.
+Native Linux x86_64 ELF only. No remote protocol, no core files, no attaching to a
+running process. `ldb` forks the program under `PTRACE_TRACEME` and drives it with
+`PTRACE_PEEKDATA`/`POKEDATA`, `PTRACE_GETREGS` and `waitpid`.
 
-The DWARF reader is ours. `gimli` is not a dependency and will not become one.
-Reading our own debug info with our own parser is the point: it is how the
-project finds out whether what Lamina emits is actually consumable, and the
-answers go back to the producer rather than into a workaround here. The only
-dependencies are `libc` and `log`.
+The DWARF reader is ldb's own. `gimli` is not a dependency. The only dependencies are
+`libc` and `log`.
 
-## Using it
+## Usage
 
 ```
 ldb <program> [program args...] [-ex <command>]... [-batch]
 ```
 
+`-ex` runs a command before ldb reads stdin. `-batch` exits after the `-ex` commands.
+
 ```
-(ldb) functions            list functions with their source file and decl line
-(ldb) break <function>     breakpoint past the prologue
-(ldb) break <file>:<line>  breakpoint on a source line
-(ldb) break *0x401037      breakpoint on a raw address
-(ldb) run
-(ldb) continue
-(ldb) step                 one source line, entering functions that have one
-(ldb) finish               run to return and report the value
-(ldb) bt
-(ldb) info args
-(ldb) info line
-(ldb) info breakpoints
-(ldb) delete <n>
-(ldb) kill
-(ldb) quit
+functions [substring]      list functions with their source file and decl line
+break <function>           breakpoint past the prologue
+break <file>:<line>        breakpoint on a source line
+break *0x<addr>           breakpoint on a raw address
+info breakpoints           list breakpoints
+delete <n>                 remove breakpoint n
+run                        start the program
+continue                   resume
+step                       run one source line, entering functions that have one
+finish                     run to return and report the value
+bt                         backtrace
+info args                  name each parameter of the current frame
+info line                  source line of the program counter
+kill                       terminate the program
+help                       print this list
+quit                       leave ldb
 ```
+
+Aliases exist for some of these (`b`, `d`, `r`, `c`, `s`, `fin`, `h`, `q`).
+
+A session against a binary built with `lamina recursive_factorial.lamina -g -o factorial`:
 
 ```
 $ ldb ./factorial -batch -ex 'break factorial' -ex run -ex bt -ex finish
@@ -54,47 +58,42 @@ Value returned is 1
 
 ## What works
 
-`.debug_info`, `.debug_abbrev`, `.debug_line` and `.debug_str` are parsed from
-scratch, DWARF 2 through 5 for `.debug_info` and `.debug_line`, 32- and 64-bit
-unit formats. `.eh_frame` CFI is interpreted far enough to unwind x86_64:
-`DW_EH_PE` pointer encodings, the full non-expression call-frame opcode set,
-and `remember_state`/`restore_state`.
+- ELF64 files with `e_machine` 62 (x86_64). Anything else is refused.
+- `.debug_info`: DWARF 2 through 4, and DWARF 5 `DW_UT_compile` units. 32- and 64-bit
+  unit formats. DWARF 5 units of any other type are refused.
+- `.debug_line`: DWARF 2 through 5.
+- `.debug_abbrev` and `.debug_str`.
+- `.eh_frame`: CIE versions 1 and 3, `DW_EH_PE` pointer encodings, and the call-frame
+  opcodes that do not need an expression evaluator, including `remember_state` and
+  `restore_state`. `DW_CFA_def_cfa_expression` and `DW_CFA_expression` are refused.
+- Backtraces are driven by CFI.
+- `finish` reads the return value through the subprogram's `DW_AT_type`: integers
+  sign- or zero-extended by their byte size, `bool`, pointers, and `f32`/`f64` from
+  `xmm0`.
+- PIE and non-PIE executables. The load bias comes from `/proc/<pid>/maps`.
 
-Backtraces are CFI-driven and are correct through recursion. `finish` reads the
-return value through the subprogram's `DW_AT_type`: integers sign- or
-zero-extended by the declared byte size, `bool`, pointers, and `f32`/`f64` out
-of `xmm0`. Both PIE and non-PIE images work; the load bias comes from
-`/proc/<pid>/maps`.
+## What it refuses
 
-Checked against gdb on lamina-built binaries: 220 breakpoint backtraces across
-186 programs agree frame for frame, and 2381 `break`/`run`/`bt`/`info
-args`/`finish` cycles complete without a parser or ptrace error.
+`info args` names each parameter and reports it as unavailable. Lamina emits no
+`DW_AT_location` today, so the value of a parameter cannot be read, and ldb does not
+guess one. A wrong value shown with confidence is worse than a refusal.
 
-## What it refuses, and why
+Other refusals name what is missing. `break file:line` on a line with no code lists the
+nearest lines that have code. An unknown function is named. An unreadable `DW_FORM` is
+reported by its code. `DW_CFA_def_cfa_expression` says that ldb has no DWARF expression
+evaluator.
 
-`info args` names each parameter and then says the value is unavailable. Lamina
-emits no `DW_AT_location` anywhere today, so no debugger can read a parameter
-out of one of its binaries. gdb says `<optimized out>`, which is the same
-answer in misleading words. Inventing a location would be a silent wrong
-answer, which this project ranks below a loud refusal.
+## Not yet
 
-Every other refusal names what is missing rather than guessing: a `break
-file:line` on a line with no code lists the nearest lines that have some; an
-unreadable `DW_FORM` is reported by its code; a `DW_CFA_def_cfa_expression`
-says that ldb has no DWARF expression evaluator.
-
-## What is not here yet
-
-No `next` (step over), no `up`/`down`/`frame`, no `list`, no watchpoints, no
-conditional or temporary breakpoints, no `print` of an expression, no reading
-of locals or globals, no disassembler, no signal handling policy, no
-multi-threaded or multi-process inferiors, no core files, no `attach`.
-
-No DWARF expression evaluator, so `DW_AT_location` will need one before `info
-args` can print a value. No `.debug_ranges`/`.debug_rnglists`, so a function
-split into non-contiguous ranges is not found. No `.debug_lamina`: that section
-does not exist yet, and the rule is that nothing is read before it is written
-and nothing is written before something reads it.
+- No `next`, `up`, `down`, `frame`, `list`, watchpoints, conditional breakpoints or
+  temporary breakpoints.
+- No `print` of an expression, and no reading of locals or globals. Parameter values
+  need `DW_AT_location` and a DWARF expression evaluator first.
+- No disassembler.
+- No `attach`, no core files, no multi-threaded or multi-process inferiors.
+- No `.debug_ranges` or `.debug_rnglists`. A function split into non-contiguous ranges
+  is not found.
+- No `.debug_lamina` section. Lamina does not write one and ldb does not read one.
 
 ## Building
 
@@ -105,6 +104,5 @@ cargo fmt --check
 cargo test
 ```
 
-The integration tests build real programs with the lamina compiler. They look
-for `../lamina/target/release/lamina`, or `$LAMINA`, and skip themselves if
-neither is there.
+The integration tests build real programs with the lamina compiler. They look for
+`../lamina/target/release/lamina`, or `$LAMINA`, and skip themselves if neither exists.
