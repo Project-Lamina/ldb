@@ -424,3 +424,33 @@ fn file_matches(table_name: &str, wanted: &str) -> bool {
         || Path::new(table_name).file_name() == Path::new(wanted).file_name()
             && Path::new(wanted).file_name().is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::*;
+
+    #[test]
+    fn random_truncations_of_the_whole_file_error_instead_of_panicking() {
+        let dir = TempDir::new("fuzz-file");
+        let Some(exe) = build(&dir, "whole", FACTORIAL) else {
+            eprintln!("skipping: no lamina release build next to this checkout");
+            return;
+        };
+        let bytes = std::fs::read(&exe).unwrap();
+        let mut rng = Rng(0x5eed_1234_abcd_0002);
+        for _ in 0..600 {
+            let n = rng.below(bytes.len());
+            let _ = crate::object::Elf::parse(bytes[..n].to_vec())
+                .map(|e| crate::symbols::DebugInfo::from_elf(e, exe.clone()));
+        }
+        for _ in 0..600 {
+            let mut b = bytes.clone();
+            for _ in 0..6 {
+                let at = rng.below(b.len());
+                b[at] = (rng.next() & 0xff) as u8;
+            }
+            let _ = crate::object::Elf::parse(b)
+                .map(|e| crate::symbols::DebugInfo::from_elf(e, exe.clone()));
+        }
+    }
+}

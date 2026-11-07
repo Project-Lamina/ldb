@@ -446,4 +446,35 @@ mod tests {
         let err = parse_units(&sections(&info, &abbrev)).unwrap_err();
         assert!(format!("{}", err).contains("abbreviation code 9"));
     }
+
+    #[test]
+    fn a_compilation_unit_of_an_unknown_version_is_refused_by_number() {
+        let mut info_sec = Vec::new();
+        info_sec.extend_from_slice(&7u32.to_le_bytes());
+        info_sec.extend_from_slice(&99u16.to_le_bytes());
+        info_sec.extend_from_slice(&0u32.to_le_bytes());
+        info_sec.push(8);
+        let err = parse_units(&sections(&info_sec, &[])).unwrap_err();
+        assert!(format!("{err}").contains("DWARF version 99"), "{err}");
+    }
+    #[test]
+    fn a_unit_longer_than_the_section_is_refused() {
+        let mut info_sec = Vec::new();
+        info_sec.extend_from_slice(&u32::MAX.wrapping_sub(0x20).to_le_bytes());
+        info_sec.extend_from_slice(&4u16.to_le_bytes());
+        let err = parse_units(&sections(&info_sec, &[])).unwrap_err();
+        assert!(format!("{err}").contains("section has"), "{err}");
+    }
+    #[test]
+    fn a_unit_with_no_die_at_all_is_refused_rather_than_indexed_into() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&4u16.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(8);
+        body.extend_from_slice(&[0, 0, 0, 0]); // nothing but padding where DIEs go
+        let mut info_sec = (body.len() as u32).to_le_bytes().to_vec();
+        info_sec.extend_from_slice(&body);
+        let err = parse_units(&sections(&info_sec, &[])).unwrap_err();
+        assert!(format!("{err}").contains("no DIE"), "{err}");
+    }
 }

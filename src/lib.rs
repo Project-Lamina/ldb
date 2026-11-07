@@ -14,6 +14,9 @@
 //! The command line is the interface: [`main`] runs one session from
 //! `std::env::args` and exits with its status, exactly as the `ldb` binary does.
 
+#[cfg(test)]
+mod test_support;
+
 pub mod arch;
 pub mod dwarf;
 pub mod error;

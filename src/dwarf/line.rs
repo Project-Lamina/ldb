@@ -563,4 +563,37 @@ mod tests {
         let err = parse_program(&sections(&bytes), 9999).unwrap_err();
         assert!(format!("{}", err).contains("past the"));
     }
+
+    #[test]
+    fn a_line_program_whose_line_range_is_zero_is_refused() {
+        let mut header = vec![1, 1, 1, 0xfb, 0, 13];
+        header.extend_from_slice(&[0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]);
+        header.push(0);
+        header.push(0);
+        let mut body = 4u16.to_le_bytes().to_vec();
+        body.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        body.extend_from_slice(&header);
+        let mut out = (body.len() as u32).to_le_bytes().to_vec();
+        out.extend_from_slice(&body);
+        let err = parse_program(&sections(&out), 0).unwrap_err();
+        assert!(format!("{err}").contains("line_range is 0"), "{err}");
+    }
+    #[test]
+    fn a_line_file_table_claiming_more_entries_than_the_section_holds_is_refused() {
+        let mut header: Vec<u8> = vec![1, 1, 1, 0xfb, 14, 13];
+        header.extend_from_slice(&[0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]);
+        header.extend_from_slice(&[0x00, 0x00]); // empty v5 directory table
+        header.push(0x01); // one format description
+        header.extend_from_slice(&[0x01, 0x08]); // DW_LNCT_path, DW_FORM_string
+        header.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0f]); // uleb: a billion files
+        let mut body = 5u16.to_le_bytes().to_vec();
+        body.push(8);
+        body.push(0);
+        body.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        body.extend_from_slice(&header);
+        let mut out = (body.len() as u32).to_le_bytes().to_vec();
+        out.extend_from_slice(&body);
+        let err = parse_program(&sections(&out), 0).unwrap_err();
+        assert!(format!("{err}").contains("more than the"), "{err}");
+    }
 }

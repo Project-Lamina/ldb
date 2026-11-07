@@ -621,4 +621,54 @@ mod tests {
         let eh = parse(&bytes, SECTION_ADDR).unwrap();
         assert!(eh.row_for_pc(0x9000).unwrap().is_none());
     }
+
+    #[test]
+    fn an_eh_frame_entry_running_past_the_section_is_refused() {
+        let mut sec = u32::MAX.wrapping_sub(0x10).to_le_bytes().to_vec();
+        sec.extend_from_slice(&[0u8; 16]);
+        let err = parse(&sec, SECTION_ADDR).unwrap_err();
+        assert!(format!("{err}").contains("runs past"), "{err}");
+    }
+    #[test]
+    fn an_fde_whose_fields_overrun_its_own_entry_is_refused() {
+        // A "zR"/absptr CIE, then an FDE whose declared length cannot hold the
+        // 8-byte initial_location the encoding demands.
+        let cie_body: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x00, // CIE_id
+            0x01, // version
+            b'z', b'R', 0x00, // augmentation
+            0x01, // code alignment
+            0x78, // data alignment
+            0x10, // return address register
+            0x01, // augmentation data length
+            0x00, // DW_EH_PE_absptr
+        ];
+        let mut sec = (cie_body.len() as u32).to_le_bytes().to_vec();
+        sec.extend_from_slice(&cie_body);
+        let cie_ptr = (sec.len() + 4) as u32;
+        let fde_body = cie_ptr.to_le_bytes().to_vec();
+        sec.extend_from_slice(&(fde_body.len() as u32).to_le_bytes());
+        sec.extend_from_slice(&fde_body);
+        sec.extend_from_slice(&[0u8; 32]); // room for the overrun to land in
+        let err = parse(&sec, SECTION_ADDR).unwrap_err();
+        assert!(format!("{err}").contains("run past its own"), "{err}");
+    }
+    #[test]
+    fn an_fde_at_the_top_of_the_address_space_does_not_overflow_a_lookup() {
+        let cie_body: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x00, 0x01, b'z', b'R', 0x00, 0x01, 0x78, 0x10, 0x01, 0x00,
+        ];
+        let mut sec = (cie_body.len() as u32).to_le_bytes().to_vec();
+        sec.extend_from_slice(&cie_body);
+        let cie_ptr = (sec.len() + 4) as u32;
+        let mut fde_body = cie_ptr.to_le_bytes().to_vec();
+        fde_body.extend_from_slice(&u64::MAX.to_le_bytes()); // initial_location
+        fde_body.extend_from_slice(&u64::MAX.to_le_bytes()); // address_range
+        fde_body.push(0x00);
+        sec.extend_from_slice(&(fde_body.len() as u32).to_le_bytes());
+        sec.extend_from_slice(&fde_body);
+        let eh = parse(&sec, SECTION_ADDR).unwrap();
+        assert!(eh.fde_for_pc(0).is_none());
+        assert!(eh.fde_for_pc(u64::MAX).is_some());
+    }
 }

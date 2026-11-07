@@ -1,4 +1,5 @@
-//! Shared test helpers; each integration test binary uses a subset.
+//! Helpers the test modules across this crate share: a scratch directory, the two
+//! compilers a subject program can come from, and a batch run of ldb over one.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -51,13 +52,22 @@ pub fn lamina() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// The `ldb` executable beside this test binary. `cargo test` builds it as part of the
+/// bin target; `cargo test --lib` does not, so say which command is missing rather than
+/// failing later on an absent program.
 pub fn ldb_binary() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
     if p.ends_with("deps") {
         p.pop();
     }
-    p.join("ldb")
+    let ldb = p.join("ldb");
+    assert!(
+        ldb.is_file(),
+        "{} is not built: run `cargo build --bin ldb`",
+        ldb.display()
+    );
+    ldb
 }
 
 /// Compile `source` with `-g` and return the executable's path.
@@ -147,3 +157,88 @@ fn @main() -> i64 {
     ret.i64 0
 }
 "#;
+
+/// xorshift64*, so a failing seed can be reproduced from the number alone.
+pub struct Rng(pub u64);
+
+impl Rng {
+    pub fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    pub fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
+    }
+}
+
+pub fn units(info_sec: &[u8], abbrev: &[u8]) -> crate::Result<Vec<crate::dwarf::info::Unit>> {
+    crate::dwarf::info::parse_units(&crate::dwarf::info::Sections {
+        info: info_sec,
+        abbrev,
+        str_: &[],
+        line_str: &[],
+    })
+}
+
+pub fn program(line_sec: &[u8]) -> crate::Result<crate::dwarf::line::LineProgram> {
+    crate::dwarf::line::parse_program(
+        &crate::dwarf::line::LineSections {
+            line: line_sec,
+            line_str: &[],
+            str_: &[],
+        },
+        0,
+    )
+}
+
+pub struct Sections {
+    pub info: Vec<u8>,
+    pub abbrev: Vec<u8>,
+    pub line: Vec<u8>,
+    pub eh_frame: Vec<u8>,
+    pub eh_frame_addr: u64,
+}
+
+/// The same C program gcc gives richer DWARF for than lamina does: several
+/// compilation units, `.debug_str`, more forms. Worth fuzzing beside our own.
+pub const C_SUBJECT: &str = "#include <stdio.h>\n\
+     struct pair { long a; double b; };\n\
+     static long rec(long n) { return n == 0 ? 0 : n + rec(n - 1); }\n\
+     double mix(struct pair p, const char *s) { return p.b + (double)p.a + (s ? 1 : 0); }\n\
+     int main(void) { struct pair p = {rec(5), 0.5}; printf(\"%f\\n\", mix(p, \"x\")); return 0; }\n";
+
+pub fn sections_of(exe: &std::path::Path) -> Sections {
+    let elf = crate::object::Elf::load(exe).unwrap();
+    Sections {
+        info: elf.section_data(".debug_info").to_vec(),
+        abbrev: elf.section_data(".debug_abbrev").to_vec(),
+        line: elf.section_data(".debug_line").to_vec(),
+        eh_frame: elf.section_data(".eh_frame").to_vec(),
+        eh_frame_addr: elf.section(".eh_frame").map_or(0, |s| s.addr),
+    }
+}
+
+pub fn gcc_sections(dir: &TempDir, name: &str, flags: &[&str]) -> Option<Sections> {
+    Some(sections_of(&cc(dir, name, C_SUBJECT, flags)?))
+}
+
+pub fn real_sections(dir: &TempDir) -> Option<Sections> {
+    let exe = build(dir, "fuzzed", FACTORIAL)?;
+    let elf = crate::object::Elf::load(&exe).unwrap();
+    Some(Sections {
+        info: elf.section_data(".debug_info").to_vec(),
+        abbrev: elf.section_data(".debug_abbrev").to_vec(),
+        line: elf.section_data(".debug_line").to_vec(),
+        eh_frame: elf.section_data(".eh_frame").to_vec(),
+        eh_frame_addr: elf.section(".eh_frame").map_or(0, |s| s.addr),
+    })
+}

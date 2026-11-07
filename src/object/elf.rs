@@ -261,4 +261,34 @@ mod tests {
         let err = Elf::parse(b"\x7fELF".to_vec()).err().unwrap();
         assert!(format!("{}", err).contains("not an ELF file"));
     }
+
+    #[test]
+    fn a_section_header_table_pointing_outside_the_file_is_refused() {
+        let mut bytes = vec![0u8; 128];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        bytes[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        bytes[40..48].copy_from_slice(&u64::MAX.to_le_bytes()); // e_shoff
+        bytes[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        bytes[60..62].copy_from_slice(&4u16.to_le_bytes()); // e_shnum
+        let err = Elf::parse(bytes).err().expect("should be refused");
+        assert!(format!("{err}").contains("past EOF"), "{err}");
+    }
+    #[test]
+    fn a_section_name_index_outside_the_table_is_refused() {
+        let mut bytes = vec![0u8; 64 + 64 * 2];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&62u16.to_le_bytes());
+        bytes[40..48].copy_from_slice(&64u64.to_le_bytes());
+        bytes[58..60].copy_from_slice(&64u16.to_le_bytes());
+        bytes[60..62].copy_from_slice(&2u16.to_le_bytes());
+        bytes[62..64].copy_from_slice(&9u16.to_le_bytes()); // e_shstrndx, out of range
+        let err = Elf::parse(bytes).err().expect("should be refused");
+        assert!(format!("{err}").contains("e_shstrndx"), "{err}");
+    }
 }
