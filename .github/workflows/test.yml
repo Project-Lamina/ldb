@@ -27,7 +27,7 @@ jobs:
           done
       - name: Build
         run: cargo build --release
-      # tests/lamina_binary.rs skips itself without a lamina build beside this
+      # repl::tests skips itself without a lamina build beside this
       # checkout, so say how many ran rather than reading a green tick as full
       # coverage. Set LAMINA to a compiler path to cover them here too.
       - name: Test

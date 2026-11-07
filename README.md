@@ -127,5 +127,5 @@ cargo check --target x86_64-apple-darwin
 cargo check --target x86_64-pc-windows-msvc
 ```
 
-The integration tests build real programs with the lamina compiler. They look for
+The tests in `repl` build real programs with the lamina compiler. They look for
 `../lamina/target/release/lamina`, or `$LAMINA`, and skip themselves if neither exists.
